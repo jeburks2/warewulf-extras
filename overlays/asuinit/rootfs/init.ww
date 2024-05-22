@@ -1,0 +1,178 @@
+#!/bin/sh
+#
+# This is one of those types of files that you shouldn't edit unless you really
+# know what you are doing and even then you should make a backup.
+#
+# Edit at your own risk! DANGER DANGER.
+
+
+if test -f "/warewulf/config"; then
+    . /warewulf/config
+else
+    echo "ERROR: Warewulf configuration file not found... rebooting in 1 minute"
+    sleep 60
+    echo b > /proc/sysrq-trigger || /sbin/reboot
+fi
+
+echo "Warewulf v4 is now booting: $WWHOSTNAME"
+echo
+
+echo "Mounting up kernel file systems"
+mkdir /proc /dev /sys /run 2>/dev/null
+mount -t proc proc /proc
+mount -t devtmpfs devtmpfs /dev
+mount -t sysfs sysfs /sys
+mount -t tmpfs tmpfs /run
+
+chmod 755 /warewulf/wwinit
+
+echo "Checking Rootfs type"
+ROOTFSTYPE=`stat -f -c "%T" /`
+
+if test "$WWROOT" = "initramfs"; then
+    echo "Provisioned to default initramfs file system: $ROOTFSTYPE"
+    echo "Calling WW Init"
+    exec /warewulf/wwinit
+elif test "$WWROOT" = "tmpfs"; then
+    if test "$ROOTFSTYPE" = "tmpfs"; then
+        echo "ERROR: Switching the root file system requires the kernel argument: 'rootfstype=ramfs'"
+    else
+        echo "Setting up tmpfs root file system"
+        mkdir /newroot
+        mount wwroot /newroot -t tmpfs
+        echo "Moving RAMFS to TMPFS"
+        tar -cf - --exclude ./proc --exclude ./sys --exclude ./dev --exclude ./newroot . | tar -xf - -C /newroot
+        mkdir /newroot/proc /newroot/dev /newroot/sys /newroot/run 2>/dev/null
+        echo "Calling switch_root and invoking WW Init"
+        exec /sbin/switch_root /newroot /warewulf/wwinit
+    fi  
+# Blame the following elif block on:
+# 2024-02-08 - Josh Burks <jeburks2@asu.edu>
+# Purpose: Download the real container and reapply overlays for the DGX 
+#          using chainloaded images, and move the root filesystem to /dev/sdb1
+elif test "$WWROOT" = "dgx"; then
+    export PATH=$PATH:/sbin
+    modprobe megaraid_sas
+    modprobe sd_mod
+    modprobe ahci
+    modprobe nvme
+    modprobe ixgbe
+    modprobe i40e
+    sleep 5
+    echo "Configuring network"
+    ip addr add {{ .NetDevs.Ethernet.IpCIDR }} dev {{ .NetDevs.Ethernet.Device }}
+    ifconfig {{ .NetDevs.Ethernet.Device }} up
+    route add default gw {{ .NetDevs.Ethernet.Gateway }}
+    sleep 2
+    echo "Mounting and formatting /dev/sdb1"
+    mkdir /newroot
+    /sbin/parted -s /dev/sda mklabel gpt
+    /sbin/parted -s -a optimal /dev/sda mkpart primary 0% 100%
+    mkfs.xfs -f /dev/sda1 2>/dev/null
+    mount /dev/sda1 /newroot
+    echo "Downloading real container"
+    wget "http://{{ .Ipaddr }}:{{ .Warewulf.Port }}/provision/{{- .NetDevs.Ethernet.Hwaddr -}}/?assetkey=$(dmidecode -s baseboard-asset-tag)&uuid=&stage=container" -O container.img
+    echo "Downloading overlays"
+    wget "http://{{ .Ipaddr }}:{{ .Warewulf.Port }}/provision/{{ .NetDevs.Ethernet.Hwaddr }}/?assetkey=$(dmidecode -s baseboard-asset-tag)&uuid=&stage=system" -O system.img
+    # In secure mode, runtime overlays must be pulled from a privileged port
+    curl --local-port 987 -o runtime.img "http://{{ .Ipaddr }}:{{ .Warewulf.Port }}/provision/{{ .NetDevs.Ethernet.Hwaddr }}/?assetkey=$(dmidecode -s baseboard-asset-tag)&uuid=&stage=runtime"
+    echo "Extracting content to block device"
+    cpio -idum < container.img -D /newroot
+    cpio -idum < system.img -D /newroot
+    cpio -idum < runtime.img -D /newroot
+    echo "calling switchroot"
+    mkdir /newroot/proc /newroot/dev /newroot/sys /newroot/run 2>/dev/null
+    exec /sbin/switch_root /newroot /warewulf/wwinit
+# Blame the following elif block on:
+# 2024-02-08 - Josh Burks <jeburks2@asu.edu>
+# Purpose: Move the root fileystem to a block device
+elif test "$WWROOT" = "xfs"; then
+    if test "$ROOTFSTYPE" = "tmpfs"; then
+        echo "ERROR: Switching the root file system requires the kernel argument: 'rootfstype=ramfs'"
+    else
+        export PATH=$PATH:/sbin
+        echo "Setting up xfs root file system"
+        mkdir /newroot
+        echo "Loading kernel modules"
+        # More kernel modules may be needed depedning on the drive type
+        modprobe megaraid_sas
+        modprobe sd_mod
+        modprobe ahci
+        modprobe nvme
+        # Give the kernel modules a few seconds to create /dev nodes
+        count=0
+        nvme="/dev/nvme0n1"
+        sda="/dev/sda"
+        sdb="/dev/sdb"
+        while test $count -lt 100; do
+                sleep 1
+                if [ -e $nvme ] && [ -e $sda ]; then
+                        echo "Both $nvme AND $sda found!"
+                        ROOTFS_TARGET=$sda
+                        ROOTFS_TARGET_1="${ROOTFS_TARGET}1"
+                        TMP_TARGET=$nvme
+                        TMP_TARGET_1="${TMP_TARGET}p1"
+                        parted -s $ROOTFS_TARGET mklabel gpt
+                        parted -s $TMP_TARGET mklabel gpt
+                        parted -s -a optimal $ROOTFS_TARGET mkpart primary 0% 100%
+                        parted -s -a optimal $TMP_TARGET mkpart primary 0% 100%
+                        break
+                elif [ -e $sda ] && [ -e $sdb ]; then
+                        echo "Both $sda AND $sdb found!"
+                        ROOTFS_TARGET=$sda
+                        ROOTFS_TARGET_1="${ROOTFS_TARGET}1"
+                        TMP_TARGET=$sdb
+                        TMP_TARGET_1="${TMP_TARGET}1"
+                        parted -s $ROOTFS_TARGET mklabel gpt
+                        parted -s $TMP_TARGET mklabel gpt
+                        parted -s -a optimal $ROOTFS_TARGET mkpart primary 0% 100%
+                        parted -s -a optimal $TMP_TARGET mkpart primary 0% 100%
+                        break
+                elif [ -e $nvme ] && [ ! -e $sda ]; then
+                        echo "Only $nvme found!"
+                        ROOTFS_TARGET=$nvme
+                        ROOTFS_TARGET_1="${ROOTFS_TARGET}p1"
+                        TMP_TARGET=$nvme
+                        TMP_TARGET_1="${TMP_TARGET}p2"
+                        parted -s $ROOTFS_TARGET mklabel gpt
+                        parted -s -a optimal $ROOTFS_TARGET mkpart primary 0% 25%
+                        parted -s -a optimal $TMP_TARGET mkpart primary 25% 100%
+                        break
+                elif [ -e $sda ] && [ ! -e $nvme ]; then
+                        echo "Only $sda found!"
+                        ROOTFS_TARGET=$sda
+                        ROOTFS_TARGET_1="${ROOTFS_TARGET}1"
+                        TMP_TARGET=$sda
+                        TMP_TARGET_1="${TMP_TARGET}2"
+                        parted -s $ROOTFS_TARGET mklabel gpt
+                        parted -s -a optimal $ROOTFS_TARGET mkpart primary 0% 25%
+                        parted -s -a optimal $TMP_TARGET mkpart primary 25% 100%
+                        break
+                else
+                        echo "Neither /dev/sda nor /dev/nvme found. Sleeping for 1 second..."
+                        count=$((count+1))
+                fi
+        done
+        # If we do not find drives in 100 attemps, reboot or enter a shell
+        if test $count -eq 100; then
+          echo "Devices not found after 100 attempts."
+          echo "Here is a shell to troubleshoot:"
+          /bin/sh
+          #echo b > /proc/sysrq-trigger || /sbin/reboot
+        fi
+        #Make the filesystems and mount the drives
+        mkfs.xfs -f $ROOTFS_TARGET_1 2> /dev/null
+        mkfs.xfs -f $TMP_TARGET_1 2> /dev/null
+        mount $ROOTFS_TARGET_1 /newroot
+        mkdir -p /newroot/tmp
+        mount $TMP_TARGET_1 /newroot/tmp
+
+        echo "Moving ROOTFS to XFS"
+        tar -cf - --exclude ./proc --exclude ./sys --exclude ./dev --exclude ./newroot --exclude ./tmp . | tar -xf - -C /newroot
+        mkdir /newroot/proc /newroot/dev /newroot/sys /newroot/run 2>/dev/null
+        echo "Calling switch_root and invoking WW Init"
+        exec /sbin/switch_root /newroot /warewulf/wwinit
+    fi
+# End jeburks2 blame
+else
+    echo "ERROR: Unknown Warewulf Root file system: $WWROOT"
