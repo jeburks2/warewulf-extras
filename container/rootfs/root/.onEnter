@@ -1,0 +1,5 @@
+#!/bin/bash 
+cd /root
+PS1="\[\e[31m\][ my-prod-container: \w]\[\e[0m\]# "
+alias exit='/root/.onExit && exit 0'
+alias exitnow='\exit 1'
