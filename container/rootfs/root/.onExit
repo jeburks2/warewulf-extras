@@ -1,0 +1,68 @@
+#!/bin/bash
+# Blame Josh Burks <jeburks2@asu.edu>
+# Purpose: Force logging of changes when exiting a WW container
+#          The goal is to then take this changelog, and use it to create a ContainerFile that you can git version control
+readonly LOG_FILE="/root/container.change.log"
+readonly MAX_LOG_SIZE=102400  # 100 MB
+readonly TIMESTAMP=$(date "+%Y-%m-%d %H:%M:%S")
+
+if [ "$1" = "now" ] || [ "$1" = "1" ]; then
+    echo "Exiting without changelog"
+    CHANGES="[$TIMESTAMP] Container exited without changes"
+    echo -e "$CHANGES" | cat - "$LOG_FILE" > temp.log && mv temp.log "$LOG_FILE"
+    exit 1
+fi
+
+# ANSI escape codes for text formatting
+BOLD="\e[1m"
+RESET="\e[0m"
+
+
+# Create the log file if it does not exist
+if [ ! -f "$LOG_FILE" ]; then
+        touch $LOG_FILE
+fi
+
+# Function to check and rotate log files
+rotate_log() {
+    if [ -f "$LOG_FILE" ] && [ "$(du -b "$LOG_FILE" | awk '{print $1}')" -gt "$MAX_LOG_SIZE" ]; then
+        mv "$LOG_FILE" "$LOG_FIE.$TIMESTAMP"
+        touch "$LOG_FILE"
+        chmod 600 "$LOG_FILE"
+    fi
+}
+
+echo ""
+echo -e "${BOLD}You MUST log your changes!${RESET}"
+echo ""
+
+# Prompt for username and loop until a non-empty username is provided
+while true; do
+    read -p "Enter username: " USERNAME
+
+    # Check if username is empty
+    if [ -n "$USERNAME" ]; then
+        break  # Exit the loop if the username is not empty
+    else
+        echo "Username cannot be empty. Please try again."
+    fi
+done
+echo ""
+
+# Prompt for multiline changes
+echo -e "${BOLD}Enter the list of changes (Press Ctrl+D to finish): ${RESET}"
+CHANGES=""
+while IFS= read -r line; do
+    CHANGES+="$line"$'\n'
+done
+
+# Add a timestamp and username to the changes
+CHANGES="[$TIMESTAMP] Changes by $USERNAME:\n$CHANGES"
+
+# Prepend the changes to the log file and rotate the log if necessary
+echo -e "$CHANGES" | cat - "$LOG_FILE" > temp.log && mv temp.log "$LOG_FILE"
+rotate_log
+
+echo "Changes logged successfully to $LOG_FILE"
+. /etc/warewulf/container_exit.sh
+exit 0
