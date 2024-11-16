@@ -1,0 +1,107 @@
+FROM ghcr.io/hpcng/warewulf-rockylinux:8.8
+
+# Ensure UID and GID are synced
+ARG BUILD_TMP_DIR
+COPY $BUILD_TMP_DIR/passwd /etc/passwd
+COPY $BUILD_TMP_DIR/group /etc/group
+COPY $BUILD_TMP_DIR/vectorengine/repos/*.repo /etc/yum.repos.d/
+
+# Hashicorp repo is broken on rocky 8.8
+RUN rm -f /etc/yum.repos.d/hashicorp.repo
+
+# Install grub so kernel will be in /boot
+#   in a ContainerFile, grub will try to populate boot entries based on the host
+#   we do not want this
+RUN dnf -yq install grub2 && rm -rf /boot/*
+
+# Version lock the kernel for the vector specific one
+RUN dnf -yq install python3-dnf-plugin-versionlock && \
+    dnf versionlock add kernel*4.18.0-477.15.1.el8_8.x86_64 
+
+# Upgrade base and install vector specific kernel
+RUN dnf -yq upgrade && \
+    dnf -yq remove kernel* && \
+    dnf -yq install https://dl.rockylinux.org/vault/rocky/8.8/BaseOS/x86_64/os/Packages/k/kernel-4.18.0-477.15.1.el8_8.x86_64.rpm && \
+    dnf -yq install https://dl.rockylinux.org/vault/rocky/8.8/BaseOS/x86_64/os/Packages/k/kernel-core-4.18.0-477.15.1.el8_8.x86_64.rpm && \
+    dnf -yq install https://dl.rockylinux.org/vault/rocky/8.8/BaseOS/x86_64/os/Packages/k/kernel-headers-4.18.0-477.15.1.el8_8.x86_64.rpm && \
+    dnf -yq install https://dl.rockylinux.org/vault/rocky/8.8/BaseOS/x86_64/os/Packages/k/kernel-modules-4.18.0-477.15.1.el8_8.x86_64.rpm && \
+    dnf -yq install https://dl.rockylinux.org/vault/rocky/8.8/BaseOS/x86_64/os/Packages/k/kernel-devel-4.18.0-477.15.1.el8_8.x86_64.rpm
+
+RUN dnf list installed | grep kernel
+
+# Do group install
+RUN dnf -yq group install "Development Tools" "base-x" "xfce" && \
+    dnf -yq --noautoremove remove pulseaudio pulseaudio-libs
+
+# Install from the list of packages
+RUN dnf -yq install $(< /mnt/packages) --nobest --skip-broken
+
+# Install RPMs from URLs (Rstudio, node-health-check, warewulf-dracut)
+RUN dnf -yq install https://download2.rstudio.org/server/rhel8/x86_64/rstudio-server-rhel-2024.04.2-764-x86_64.rpm && \
+    dnf -yq install https://github.com/mej/nhc/releases/download/1.4.3/lbnl-nhc-1.4.3-1.el8.noarch.rpm && \
+    dnf -yq install https://github.com/warewulf/warewulf/releases/download/v4.5.7/warewulf-dracut-4.5.7-1.el8.noarch.rpm && \
+    dnf -yq install https://github.com/dundee/gdu/releases/download/v5.29.0/gdu-5.29.0-1.x86_64.rpm
+
+# Pip install for websockify and arbiter depenencies
+RUN pip3 install --upgrade pip && \
+    pip3 install websockify matplotlib toml requests prometheus_client sqlalchemy && \
+    ln -s /usr/local/bin/websockify /bin/websockify
+
+#Debug only
+RUN echo $(rpm -q kernel-core --qf '%{version}-%{release}.%{arch}\n' | tail -n 1)
+RUN ls /usr/src/kernels/
+
+# Enable services
+RUN systemctl enable oddjobd.service sssd.service autofs.service munge.service auditd.service
+RUN authselect select sssd with-mkhomedir --force
+
+# Touch log files so they exist prior to service starts
+RUN touch /var/log/audit/audit.log && \
+    touch /var/log/nhc.log && \
+    mkdir -p /var/log/slurm && touch /var/log/slurm/slurmd.log
+
+# Install Mellanox Drivers
+ARG MLX_VERSION
+RUN ( cd /tmp                                                       \
+  && tar -xf /mnt/mlx/MLNX_OFED_LINUX-${MLX_VERSION}.tgz             \
+) && ( cd /tmp/MLNX_OFED_LINUX-${MLX_VERSION}                        \
+  && ./mlnxofedinstall                                              \
+    --distro rhel8.8                                                \
+    --skip-repo                                                     \
+    --kernel $(rpm -q kernel-core --qf '%{version}-%{release}.%{arch}\n' | tail -n 1) \
+    --add-kernel-support                                            \
+    --hpc                                                           \
+) && rm -rf /tmp/MLNX_OFED_LINUX*
+
+# Install VectorEngine Software
+RUN dnf -yq install python3.8
+RUN python3.8 -m pip install pyqubo
+RUN dnf -yq install https://sxauroratsubasa.sakura.ne.jp/repos/TSUBASA-soft-release-ve1-3.0-1.noarch.rpm
+RUN TSUBASA_GROUPS="ve-devel nec-sdk-devel nec-mpi-devel" && \
+    /opt/nec/ve/sbin/TSUBASA-groups-remark.sh $TSUBASA_GROUPS && \
+    dnf -yq group install $TSUBASA_GROUPS
+
+## Fix many broken manual pages
+RUN mandb 2&>/dev/null
+
+## Set the timezone/local
+ENV LANG=en_US.UTF-8
+ENV TZ=America/Phoenix
+RUN localedef -i en_US -f UTF-8 en_US.UTF-8 && \
+    ln -sf /usr/share/zoneinfo/$TZ /etc/localtime && \
+    echo $TZ > /etc/timezone
+
+# Copy Scipts inside the container 
+ARG PS1TAG
+COPY --chmod=700 scripts/.onE* /root/
+COPY scripts/excludes /etc/warewulf/excludes
+RUN sed -i "s/\REPLACEME/${PS1TAG}/" /root/.onEnter
+RUN echo "[ -f /root/.onEnter ] && . /root/.onEnter" >> /root/.bashrc
+RUN cat /root/.onEnter
+
+# This does not work well in a podman build, you'll need to run it manually in the chroot
+RUN dracut --force --no-hostonly --add wwinit --kver $(ls /lib/modules | head -n1)
+#
+## Cleanup
+RUN dnf -y remove $(dnf repoquery --installonly --latest-limit=-1 -q) \
+  && dnf clean all

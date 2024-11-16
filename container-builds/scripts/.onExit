@@ -1,7 +1,5 @@
 #!/bin/bash
-# Blame Josh Burks <jeburks2@asu.edu>
-# Purpose: Force logging of changes when exiting a WW container
-#          The goal is to then take this changelog, and use it to create a ContainerFile that you can git version control
+  
 readonly LOG_FILE="/root/container.change.log"
 readonly MAX_LOG_SIZE=102400  # 100 MB
 readonly TIMESTAMP=$(date "+%Y-%m-%d %H:%M:%S")
@@ -33,7 +31,7 @@ rotate_log() {
 }
 
 echo ""
-echo -e "${BOLD}You MUST log your changes!${RESET}"
+echo -e "${BOLD}Change Management is Important! Who are you and what did you do to the container?${RESET}"
 echo ""
 
 # Prompt for username and loop until a non-empty username is provided

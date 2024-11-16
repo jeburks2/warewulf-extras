@@ -1,8 +1,0 @@
-/boot/
-/usr/share/GeoIP
-/root/.onExit
-/root/.onEnter
-/root/NVIDIA*
-/root/*.rpm
-/root/.cache/*
-/var/tmp

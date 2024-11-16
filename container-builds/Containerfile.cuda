@@ -1,0 +1,100 @@
+FROM ghcr.io/hpcng/warewulf-rockylinux:8
+ARG BUILD_TMP_DIR
+
+# Ensure UID and GID are synced
+COPY ${BUILD_TMP_DIR}/passwd /etc/passwd
+COPY ${BUILD_TMP_DIR}/group /etc/group
+
+# Configure Repos
+RUN rm -f /etc/yum.repos.d/*.repo
+COPY $BUILD_TMP_DIR/cuda/repos/*.repo /etc/yum.repos.d/
+# Install grub so kernel will be in /boot
+#   in a ContainerFile, grub will try to populate boot entries based on the host
+#   we do not want this
+RUN dnf -yq install grub2 && rm -rf /boot/*
+
+# Upgrade base and reinstall kernel-core to populate /boot
+RUN dnf -yq upgrade && \
+    dnf -yq reinstall kernel-core
+
+# Do group install
+RUN dnf -yq group install "Development Tools" "base-x" "xfce" && \
+    dnf -yq --noautoremove remove pulseaudio pulseaudio-libs
+
+# Install from the list of packages
+RUN dnf -yq install $(< /mnt/packages) --nobest --skip-broken
+
+# Install RPMs from URLs (Rstudio, node-health-check, warewulf-dracut)
+RUN dnf -yq install https://download2.rstudio.org/server/rhel8/x86_64/rstudio-server-rhel-2024.04.2-764-x86_64.rpm && \
+    dnf -yq install https://github.com/mej/nhc/releases/download/1.4.3/lbnl-nhc-1.4.3-1.el8.noarch.rpm && \
+    dnf -yq install https://github.com/warewulf/warewulf/releases/download/v4.5.7/warewulf-dracut-4.5.7-1.el8.noarch.rpm && \
+    dnf -yq install https://github.com/dundee/gdu/releases/download/v5.29.0/gdu-5.29.0-1.x86_64.rpm
+
+# Pip install for websockify and arbiter depenencies
+RUN pip3 install --upgrade pip && \
+    pip3 install websockify matplotlib toml requests prometheus_client sqlalchemy && \
+    ln -s /usr/local/bin/websockify /bin/websockify
+
+#Debug only
+#RUN echo $(rpm -q kernel-core --qf '%{version}-%{release}.%{arch}\n' | tail -n 1)
+#RUN ls /usr/src/kernels/
+
+# Enable services
+RUN systemctl enable oddjobd.service sssd.service autofs.service munge.service consul.service auditd.service
+RUN authselect select sssd with-mkhomedir --force
+
+# Touch log files so they exist prior to service starts
+RUN touch /var/log/audit/audit.log && \
+    touch /var/log/nhc.log && \
+    mkdir -p /var/log/slurm && touch /var/log/slurm/slurmd.log
+
+# Install Mellanox Drivers
+ARG MLX_VERSION
+RUN ( cd /tmp                                                       \
+  && tar -xf /mnt/mlx/MLNX_OFED_LINUX-${MLX_VERSION}.tgz \
+) && ( cd /tmp/MLNX_OFED_LINUX-${MLX_VERSION}        \
+  && ./mlnxofedinstall                                              \
+    --distro rhel8.10                                                \
+    --skip-repo                                                     \
+    --kernel $(rpm -q kernel-core --qf '%{version}-%{release}.%{arch}\n' | tail -n 1) \
+    --add-kernel-support                                            \
+    --hpc                                                           \
+) && rm -rf /tmp/MLNX_OFED_LINUX*
+#
+## Install NVIDIA Drivers
+ARG NVIDIA_VERSION
+RUN cd /mnt/${BUILD_TMP_DIR} && chmod +x NVIDIA-Linux-x86_64-${NVIDIA_VERSION}.run &&  \
+    /mnt/${BUILD_TMP_DIR}/NVIDIA-Linux-x86_64-${NVIDIA_VERSION}.run                    \
+    --silent                                                          \
+    --kernel-source-path=/usr/src/kernels/$(rpm -q kernel-core --qf '%{version}-%{release}.%{arch}\n' | tail -n 1)    \
+    --kernel-name=$(rpm -q kernel-core --qf '%{version}-%{release}.%{arch}\n' | tail -n 1)                            \
+    --systemd                                                       \
+    -m=kernel-open
+RUN dnf install -y datacenter-gpu-manager 
+#RUN dnf install -y nvidia-fabric-manager-${NVIDIA_VERSION}-1
+RUN dnf -y install https://developer.download.nvidia.com/compute/cuda/repos/rhel8/x86_64/nvidia-fabric-manager-${NVIDIA_VERSION}-1.x86_64.rpm
+RUN echo 'options nvidia "NVreg_RestrictProfilingToAdminUsers=0"' > /etc/modprobe.d/nvidia.conf
+#
+## Fix many broken manual pages
+RUN mandb 2&>/dev/null
+#
+## Set the timezone/local
+ENV LANG=en_US.UTF-8
+ENV TZ=America/Phoenix
+RUN localedef -i en_US -f UTF-8 en_US.UTF-8 && \
+    ln -sf /usr/share/zoneinfo/$TZ /etc/localtime && \
+    echo $TZ > /etc/timezone
+#
+# Copy Scipts inside the container 
+ARG PS1TAG
+COPY --chmod=700 scripts/.onE* /root/
+COPY scripts/excludes /etc/warewulf/excludes
+RUN sed -i "s/\REPLACEME/${PS1TAG}/" /root/.onEnter
+RUN echo "[ -f /root/.onEnter ] && . /root/.onEnter" >> /root/.bashrc
+
+# This does not work well in a podman build, you'll need to run it manually in the chroot
+RUN dracut --force --no-hostonly --add wwinit --kver $(ls /lib/modules | head -n1)
+#
+## Cleanup
+RUN dnf -y remove $(dnf repoquery --installonly --latest-limit=-1 -q) \
+    && dnf clean all
