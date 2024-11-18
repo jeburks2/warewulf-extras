@@ -1,7 +1,7 @@
 # Building iPXE 
 To best support booting nodes, we need to build iPXE from source. This fixes issues with nodes getting stuck in the boot process and enables compressed images to be used. 
 
-This section is based on this script[https://github.com/hpcng/warewulf/blob/41c289023277fb9cdaace9a71809db10acfb122c/scripts/build-ipxe.sh] and references from the Warewulf slack channel. 
+This section is based on this [script](https://github.com/hpcng/warewulf/blob/41c289023277fb9cdaace9a71809db10acfb122c/scripts/build-ipxe.sh) and references from the Warewulf slack channel. 
 
 As of Jan 2024, the latest commits to the iPXE GitHub do not work for us and we need to pull from a commit from Aug 2023. 
 
