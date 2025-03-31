@@ -2,6 +2,7 @@ ImageMagick
 ImageMagick-c++-devel
 Lmod 
 VirtualGL 
+Xvfb
 apptainer
 atlas-devel
 attr
@@ -125,6 +126,7 @@ liberation-serif-fonts
 libevent-devel
 libfabric-devel
 libffi-devel
+libgcc.i686 
 libgcrypt-devel
 libgdata-devel
 libgdiplus-devel
@@ -303,6 +305,10 @@ tcl-devel
 tcsh
 texinfo
 texinfo-tex
+texlive-*
+texlive-cm-super
+texlive-dvipng
+texlive-type1cm
 time
 tk 
 tk-devel

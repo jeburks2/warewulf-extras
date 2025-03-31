@@ -1,12 +1,21 @@
-#FROM ghcr.io/warewulf/warewulf-rockylinux@sha256:5c858dfb14a20bd78f1f9d5caf46901d119b3a1b577735e3f304f87e43175d18
-FROM ghcr.io/warewulf/warewulf-rockylinux@sha256:de49c65d3231b431c57cfe804c12ce0f1bbc1ad5ff829a0b5e35059726d182c8
+FROM ghcr.io/warewulf/warewulf-rockylinux@sha256:133abaa48340eb902602f3e531ed23025d3a46794dc423a618f2fcd16c994fb3
+ARG TARGET_ARCH
+ARG OS_VERSION
+
 
 # Ensure UID and GID are synced
 ARG BUILD_TMP_DIR
 COPY $BUILD_TMP_DIR/passwd /etc/passwd
 COPY $BUILD_TMP_DIR/group /etc/group
+
+# Configure Repos
+ARG REPO_PATH
 RUN rm -f /etc/yum.repos.d/*.repo
-COPY $BUILD_TMP_DIR/gracehopper/repos/*.repo /etc/yum.repos.d/
+COPY $BUILD_TMP_DIR/${REPO_PATH}/repos/*.repo /etc/yum.repos.d/
+# Install grub so kernel will be in /boot
+#   in a ContainerFile, grub will try to populate boot entries based on the host
+#   we do not want this
+#RUN dnf -yq install grub2 && rm -rf /boot/*
 
 # Install EPEL 
 RUN dnf -y install https://dl.fedoraproject.org/pub/epel/epel-release-latest-9.noarch.rpm
@@ -21,27 +30,30 @@ RUN dnf -yq install $(< /mnt/packages) --nobest --skip-broken
 
 # Upgrade kernel to 64
 RUN dnf -y --noautoremove remove \
-		  	kernel \
-		 	kernel-core \
-		  	kernel-devel \
-		  	kernel-modules \
-		  	kernel-modules-core \
-		  	kernel-modules-extra
-		  
+    kernel \
+    kernel-core \
+    kernel-devel \
+    kernel-modules \
+    kernel-modules-core \
+    kernel-modules-extra
+
 RUN dnf -y install kernel-64k \
-                   kernel-64k-core \
-		   kernel-64k-devel \
-		   kernel-64k-modules \
-		   kernel-64k-modules-core \
-		   kernel-64k-modules-extra
+    kernel-64k-core \
+    kernel-64k-devel \
+    kernel-64k-modules \
+    kernel-64k-modules-core \
+    kernel-64k-modules-extra
 
 RUN dnf -y remove $(dnf repoquery --installonly --latest-limit=-1 -q)
 
 # Install RPMs from URLs (Rstudio, node-health-check, warewulf-dracut)
-RUN dnf -yq install https://s3.amazonaws.com/rstudio-ide-build/server/rhel9/arm64/rstudio-server-rhel-2024.07.0-daily-294-aarch64.rpm && \
+ARG WWDRACUT_VERSION
+ARG RSTUDIO_VERSION
+RUN dnf -yq install https://s3.amazonaws.com/rstudio-ide-build/server/rhel${OS_VERSION%%.*}/arm64/rstudio-server-rhel-${RSTUDIO_VERSION}-${TARGET_ARCH}.rpm && \
     dnf -yq install https://github.com/mej/nhc/releases/download/1.4.3/lbnl-nhc-1.4.3-1.el8.noarch.rpm && \
-    dnf -yq install https://github.com/warewulf/warewulf/releases/download/v4.5.7/warewulf-dracut-4.5.7-1.el9.noarch.rpm && \
-    dnf -yq install https://github.com/dundee/gdu/releases/download/v5.29.0/gdu-5.29.0-1.aarch64.rpm
+    dnf -yq install https://github.com/warewulf/warewulf/releases/download/v${WWDRACUT_VERSION}/warewulf-dracut-${WWDRACUT_VERSION}-1.el${OS_VERSION%%.*}.noarch.rpm && \
+    dnf -yq install https://github.com/dundee/gdu/releases/download/v5.29.0/gdu-5.29.0-1.${TARGET_ARCH}.rpm
+
 
 # Pip install for websockify and arbiter depenencies
 RUN pip3 install --upgrade pip && \
@@ -49,12 +61,17 @@ RUN pip3 install --upgrade pip && \
     ln -s /usr/local/bin/websockify /bin/websockify
 
 #Debug only
-#RUN echo $(rpm -q kernel-64k-core --qf '%{version}-%{release}.%{arch}\n' | tail -n 1)
-#RUN ls /usr/src/kernels/
-#RUN ls /lib/modules
+RUN echo $(rpm -q kernel-64k-core --qf '%{version}-%{release}.%{arch}\n' | tail -n 1)
+RUN ls /usr/src/kernels/
+RUN ls /lib/modules
+RUN ls /usr/src/kernels/
+RUN ls /usr/src/kernels/ && \
+    ls /usr/src/kernels/$(ls /usr/src/kernels/ | tail -n1)
+RUN ls /usr/src/kernels/$(rpm -q kernel-64k-core --qf '%{version}-%{release}.%{arch}+64k')/arch/arm64
+
 
 # Enable services
-RUN systemctl enable oddjobd.service sssd.service autofs.service munge.service auditd.service
+RUN systemctl enable oddjobd.service sssd.service autofs.service munge.service auditd.service consul.service
 RUN authselect select sssd with-mkhomedir --force
 
 # Touch log files so they exist prior to service starts
@@ -65,29 +82,32 @@ RUN touch /var/log/audit/audit.log && \
 # Install Mellanox Drivers
 ARG MLX_VERSION
 RUN ( cd /tmp                                                       \
-  && tar -xf /mnt/mlx/MLNX_OFED_LINUX-${MLX_VERSION}.tgz            \
-) && ( cd /tmp/MLNX_OFED_LINUX-${MLX_VERSION}                       \
-  && ./mlnxofedinstall --help                                       \ 
-  && ./mlnxofedinstall                                              \
-    --distro rhel9.4                                                \
+    && tar -xf /mnt/mlx/MLNX_OFED_LINUX-${MLX_VERSION}.tgz \
+    ) && ( cd /tmp/MLNX_OFED_LINUX-${MLX_VERSION}        \
+    #  && ./mlnxofedinstall --help \ 
+    && ./mlnxofedinstall                                              \
+    --distro rhel${OS_VERSION}                                                \
     --skip-repo                                                     \
     --kernel $(rpm -q kernel-64k-core --qf '%{version}-%{release}.%{arch}+64k') \
     --kernel-sources /usr/src/kernels/$(rpm -q kernel-64k-core --qf '%{version}-%{release}.%{arch}+64k') \
     --add-kernel-support                                            \
     --hpc                                                           \
-) && rm -rf /tmp/MLNX_OFED_LINUX*
+    --without-fw-update						    \
+    )
+RUN rm -rf /tmp/MLNX_OFED_LINUX*
 
 # Install NVIDIA Drivers
 ARG NVIDIA_VERSION
-RUN cd /mnt/${BUILD_TMP_DIR} && chmod +x NVIDIA-Linux-aarch64-${NVIDIA_VERSION}.run &&                       \
-    /mnt/${BUILD_TMP_DIR}/NVIDIA-Linux-aarch64-${NVIDIA_VERSION}.run                                         \
-    --silent                                                                                                 \
+RUN cd /mnt/${BUILD_TMP_DIR} && chmod +x NVIDIA-Linux-${TARGET_ARCH}-${NVIDIA_VERSION}.run &&  \
+    /mnt/${BUILD_TMP_DIR}/NVIDIA-Linux-${TARGET_ARCH}-${NVIDIA_VERSION}.run                                     \
+    --silent                                                        \
     --kernel-source-path=/usr/src/kernels/$(rpm -q kernel-64k-core --qf '%{version}-%{release}.%{arch}+64k') \
-    --kernel-name=$(rpm -q kernel-64k-core --qf '%{version}-%{release}.%{arch}+64k')                         \
-    --systemd                                                                                                 \
-    -m=kernel-open
+    --kernel-name=$(rpm -q kernel-64k-core --qf '%{version}-%{release}.%{arch}+64k') \
+    --systemd                                                       \
+    -m=kernel-open 
+RUN dnf -yq config-manager --add-repo https://developer.download.nvidia.com/compute/cuda/repos/rhel9/sbsa/cuda-rhel9.repo && \
+    dnf -yq install datacenter-gpu-manager-4-cuda12-4.1.1-1 
 RUN echo 'options nvidia "NVreg_RestrictProfilingToAdminUsers=0"' > /etc/modprobe.d/nvidia.conf
-#RUN dnf install -yq datacenter-gpu-manager # Not compatible with aarch
 
 # Fix many broken manual pages
 RUN mandb 2&>/dev/null
@@ -102,13 +122,13 @@ RUN localedef -i en_US -f UTF-8 en_US.UTF-8 && \
 # Copy Scipts inside the container 
 ARG PS1TAG
 COPY --chmod=700 scripts/.onE* /root/
+COPY --chmod=700 scripts/wwdracut /root/
 COPY scripts/excludes /etc/warewulf/excludes
 RUN sed -i "s/\REPLACEME/${PS1TAG}/" /root/.onEnter
 RUN echo "[ -f /root/.onEnter ] && . /root/.onEnter" >> /root/.bashrc
 
-# This does not work well in a podman build, you'll need to run it manually in the chroot
-RUN dracut --force --no-hostonly --add wwinit --kver $(rpm -q kernel-64k-core --qf '%{version}-%{release}.%{arch}+64k')
+RUN dnf -yq install grub2 && rm -rf /boot/*
 
 # Cleanup
 RUN dnf -y remove $(dnf repoquery --installonly --latest-limit=-1 -q) \
-  && dnf clean all
+    && dnf clean all

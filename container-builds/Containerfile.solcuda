@@ -1,38 +1,25 @@
-FROM ghcr.io/hpcng/warewulf-rockylinux:8.8
+FROM ghcr.io/hpcng/warewulf-rockylinux:8
 ARG BUILD_TMP_DIR
 ARG TARGET_ARCH
 ARG OS_VERSION
-ARG KERNEL_VERSION="4.18.0-477.15.1.el8_8.x86_64"
+
 
 # Ensure UID and GID are synced
-COPY $BUILD_TMP_DIR/passwd /etc/passwd
-COPY $BUILD_TMP_DIR/group /etc/group
+COPY ${BUILD_TMP_DIR}/passwd /etc/passwd
+COPY ${BUILD_TMP_DIR}/group /etc/group
+
 # Configure Repos
 ARG REPO_PATH
+RUN rm -f /etc/yum.repos.d/*.repo
 COPY $BUILD_TMP_DIR/${REPO_PATH}/repos/*.repo /etc/yum.repos.d/
-
-# Hashicorp repo is broken on rocky 8.8
-RUN rm -f /etc/yum.repos.d/hashicorp.repo
-
 # Install grub so kernel will be in /boot
 #   in a ContainerFile, grub will try to populate boot entries based on the host
 #   we do not want this
 RUN dnf -yq install grub2 && rm -rf /boot/*
 
-# Version lock the kernel for the vector specific one
-RUN dnf -yq install python3-dnf-plugin-versionlock && \
-    dnf versionlock add kernel*${KERNEL_VERSION} 
-
-# Upgrade base and install vector specific kernel
+# Upgrade base and reinstall kernel-core to populate /boot
 RUN dnf -yq upgrade && \
-    dnf -yq remove kernel* && \
-    dnf -yq install https://dl.rockylinux.org/vault/rocky/8.8/BaseOS/x86_64/os/Packages/k/kernel-${KERNEL_VERSION}.rpm && \
-    dnf -yq install https://dl.rockylinux.org/vault/rocky/8.8/BaseOS/x86_64/os/Packages/k/kernel-core-${KERNEL_VERSION}.rpm && \
-    dnf -yq install https://dl.rockylinux.org/vault/rocky/8.8/BaseOS/x86_64/os/Packages/k/kernel-headers-${KERNEL_VERSION}.rpm && \
-    dnf -yq install https://dl.rockylinux.org/vault/rocky/8.8/BaseOS/x86_64/os/Packages/k/kernel-modules-${KERNEL_VERSION}.rpm && \
-    dnf -yq install https://dl.rockylinux.org/vault/rocky/8.8/BaseOS/x86_64/os/Packages/k/kernel-devel-${KERNEL_VERSION}.rpm
-
-RUN dnf list installed | grep kernel
+    dnf -yq reinstall kernel-core
 
 # Do group install
 RUN dnf -yq group install "Development Tools" "base-x" "xfce" && \
@@ -55,11 +42,11 @@ RUN pip3 install --upgrade pip && \
     ln -s /usr/local/bin/websockify /bin/websockify
 
 #Debug only
-RUN echo $(rpm -q kernel-core --qf '%{version}-%{release}.%{arch}\n' | tail -n 1)
-RUN ls /usr/src/kernels/
+#RUN echo $(rpm -q kernel-core --qf '%{version}-%{release}.%{arch}\n' | tail -n 1)
+#RUN ls /usr/src/kernels/
 
 # Enable services
-RUN systemctl enable oddjobd.service sssd.service autofs.service munge.service auditd.service
+RUN systemctl enable oddjobd.service sssd.service autofs.service munge.service consul.service auditd.service
 RUN authselect select sssd with-mkhomedir --force
 
 # Touch log files so they exist prior to service starts
@@ -73,22 +60,29 @@ RUN ( cd /tmp                                                       \
     && tar -xf /mnt/mlx/MLNX_OFED_LINUX-${MLX_VERSION}.tgz \
     ) && ( cd /tmp/MLNX_OFED_LINUX-${MLX_VERSION}        \
     && ./mlnxofedinstall                                              \
-    --distro rhel${OS_VERSION}                                                   \
+    --distro rhel${OS_VERSION}                                              \
     --skip-repo                                                     \
     --kernel $(rpm -q kernel-core --qf '%{version}-%{release}.%{arch}\n' | tail -n 1) \
     --add-kernel-support                                            \
     --hpc                                                           \
-    --without-fw-update \
     ) && rm -rf /tmp/MLNX_OFED_LINUX*
-
-# Install VectorEngine Software
-RUN dnf -yq install python3.8
-RUN python3.8 -m pip install pyqubo
-RUN dnf -yq install https://sxauroratsubasa.sakura.ne.jp/repos/TSUBASA-soft-release-ve1-3.0-1.noarch.rpm
-RUN TSUBASA_GROUPS="ve-devel nec-sdk-devel nec-mpi-devel" && \
-    /opt/nec/ve/sbin/TSUBASA-groups-remark.sh $TSUBASA_GROUPS && \
-    dnf -yq group install $TSUBASA_GROUPS
-
+#
+## Install NVIDIA Drivers
+ARG NVIDIA_VERSION
+RUN cd /mnt/${BUILD_TMP_DIR} && chmod +x NVIDIA-Linux-${TARGET_ARCH}-${NVIDIA_VERSION}.run && \
+    /mnt/${BUILD_TMP_DIR}/NVIDIA-Linux-${TARGET_ARCH}-${NVIDIA_VERSION}.run \
+    --silent \
+    --kernel-source-path=/usr/src/kernels/$(rpm -q kernel-core --qf '%{version}-%{release}.%{arch}\n' | tail -n 1) \
+    --kernel-name=$(rpm -q kernel-core --qf '%{version}-%{release}.%{arch}\n' | tail -n 1) \
+    --systemd \
+    -m=kernel-open
+#Version lock the nvidia driver to prevent live upgrades
+RUN dnf -yq install python3-dnf-plugin-versionlock && \
+    dnf -yq install https://developer.download.nvidia.com/compute/cuda/repos/rhel${OS_VERSION%%.*}/${TARGET_ARCH}/datacenter-gpu-manager-4-cuda12-4.1.1-1.${TARGET_ARCH}.rpm && \
+    dnf -yq install https://developer.download.nvidia.com/compute/cuda/repos/rhel${OS_VERSION%%.*}/${TARGET_ARCH}/nvidia-fabric-manager-${NVIDIA_VERSION}-1.${TARGET_ARCH}.rpm && \
+    dnf versionlock add nvidia-fabric-manager-${NVIDIA_VERSION}-1.${TARGET_ARCH} 
+RUN echo 'options nvidia "NVreg_RestrictProfilingToAdminUsers=0"' > /etc/modprobe.d/nvidia.conf
+#
 ## Fix many broken manual pages
 RUN mandb 2&>/dev/null
 #
@@ -98,7 +92,7 @@ ENV TZ=America/Phoenix
 RUN localedef -i en_US -f UTF-8 en_US.UTF-8 && \
     ln -sf /usr/share/zoneinfo/$TZ /etc/localtime && \
     echo $TZ > /etc/timezone
-
+#
 # Copy Scipts inside the container 
 ARG PS1TAG
 COPY --chmod=700 scripts/.onE* /root/

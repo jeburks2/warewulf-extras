@@ -1,0 +1,2 @@
+#!/bin/bash
+/usr/bin/dracut --force --no-hostonly --add wwinit --kver $(ls /lib/modules | head -n1)

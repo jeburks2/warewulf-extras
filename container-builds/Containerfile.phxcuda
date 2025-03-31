@@ -22,8 +22,7 @@ RUN dnf -yq upgrade && \
     dnf -yq reinstall kernel-core
 
 # Do group install
-RUN dnf -yq group install "Development Tools" "base-x" "xfce" && \
-    dnf -yq --noautoremove remove pulseaudio pulseaudio-libs
+RUN dnf -yq group install "Development Tools" "base-x" "xfce" 
 
 # Install from the list of packages
 RUN dnf -yq install $(< /mnt/packages) --nobest --skip-broken
@@ -36,14 +35,15 @@ RUN dnf -yq install https://download2.rstudio.org/server/rhel${OS_VERSION%%.*}/$
     dnf -yq install https://github.com/warewulf/warewulf/releases/download/v${WWDRACUT_VERSION}/warewulf-dracut-${WWDRACUT_VERSION}-1.el${OS_VERSION%%.*}.noarch.rpm && \
     dnf -yq install https://github.com/dundee/gdu/releases/download/v5.29.0/gdu-5.29.0-1.${TARGET_ARCH}.rpm
 
+
 # Pip install for websockify and arbiter depenencies
 RUN pip3 install --upgrade pip && \
-    pip3 install websockify matplotlib toml requests && \
+    pip3 install websockify matplotlib toml requests prometheus_client sqlalchemy && \
     ln -s /usr/local/bin/websockify /bin/websockify
-#
+
 #Debug only
-RUN echo $(rpm -q kernel-core --qf '%{version}-%{release}.%{arch}\n' | tail -n 1)
-RUN ls /usr/src/kernels/
+#RUN echo $(rpm -q kernel-core --qf '%{version}-%{release}.%{arch}\n' | tail -n 1)
+#RUN ls /usr/src/kernels/
 
 # Enable services
 RUN systemctl enable oddjobd.service sssd.service autofs.service munge.service consul.service auditd.service
@@ -54,35 +54,31 @@ RUN touch /var/log/audit/audit.log && \
     touch /var/log/nhc.log && \
     mkdir -p /var/log/slurm && touch /var/log/slurm/slurmd.log
 
-# Install Mellanox Drivers
-ARG MLX_VERSION
-RUN ( cd /tmp                                                       \
-    && tar -xf /mnt/mlx/MLNX_OFED_LINUX-${MLX_VERSION}.tgz            \
-    ) && ( cd /tmp/MLNX_OFED_LINUX-${MLX_VERSION}                       \
-    && ./mlnxofedinstall                                              \
-    --distro rhel${OS_VERSION}                                                   \
-    --skip-repo                                                     \
-    --kernel $(rpm -q kernel-core --qf '%{version}-%{release}.%{arch}\n' | tail -n 1) \
-    --add-kernel-support                                            \
-    --hpc                                                           \
-    --without-fw-update \
-    ) && rm -rf /tmp/MLNX_OFED_LINUX*
-
-# Install ROCM Drivers
-RUN dnf -yq install https://repo.radeon.com/amdgpu-install/6.1.2/rhel/8.9/amdgpu-install-6.1.60102-1.el8.noarch.rpm
-RUN amdgpu-install --usecase=dkms,hip || true
-RUN dnf -yq install amdgpu-dkms rocm-dkms rocm-hip-runtime
-
-# Fix many broken manual pages
+## Install NVIDIA Drivers
+ARG NVIDIA_VERSION
+RUN cd /mnt/${BUILD_TMP_DIR} && chmod +x NVIDIA-Linux-${TARGET_ARCH}-${NVIDIA_VERSION}.run &&  \
+    /mnt/${BUILD_TMP_DIR}/NVIDIA-Linux-${TARGET_ARCH}-${NVIDIA_VERSION}.run                   \
+    --silent                                                          \
+    --kernel-source-path=/usr/src/kernels/$(rpm -q kernel-core --qf '%{version}-%{release}.%{arch}\n' | tail -n 1)    \
+    --kernel-name=$(rpm -q kernel-core --qf '%{version}-%{release}.%{arch}\n' | tail -n 1)                            \
+    --systemd
+#Version lock the nvidia driver to prevent live upgrades
+RUN dnf -yq install python3-dnf-plugin-versionlock && \
+    dnf -yq install https://developer.download.nvidia.com/compute/cuda/repos/rhel${OS_VERSION%%.*}/${TARGET_ARCH}/datacenter-gpu-manager-4-proprietary-cuda12-4.1.1-1.${TARGET_ARCH}.rpm && \
+    dnf -yq install https://developer.download.nvidia.com/compute/cuda/repos/rhel${OS_VERSION%%.*}/${TARGET_ARCH}/nvidia-fabric-manager-${NVIDIA_VERSION}-1.${TARGET_ARCH}.rpm && \
+    dnf versionlock add nvidia-fabric-manager-${NVIDIA_VERSION}-1.${TARGET_ARCH}
+RUN echo 'options nvidia "NVreg_RestrictProfilingToAdminUsers=0"' > /etc/modprobe.d/nvidia.conf
+#
+## Fix many broken manual pages
 RUN mandb 2&>/dev/null
-
-# Set the timezone/local
+#
+## Set the timezone/local
 ENV LANG=en_US.UTF-8
 ENV TZ=America/Phoenix
 RUN localedef -i en_US -f UTF-8 en_US.UTF-8 && \
     ln -sf /usr/share/zoneinfo/$TZ /etc/localtime && \
     echo $TZ > /etc/timezone
-
+#
 # Copy Scipts inside the container 
 ARG PS1TAG
 COPY --chmod=700 scripts/.onE* /root/
@@ -91,6 +87,6 @@ COPY scripts/excludes /etc/warewulf/excludes
 RUN sed -i "s/\REPLACEME/${PS1TAG}/" /root/.onEnter
 RUN echo "[ -f /root/.onEnter ] && . /root/.onEnter" >> /root/.bashrc
 
-# Cleanup
-RUN dnf -y remove $(dnf repoquery --installonly --latest-limit=-1 -q) && \
-    dnf clean all
+## Cleanup
+RUN dnf -y remove $(dnf repoquery --installonly --latest-limit=-1 -q) \
+    && dnf clean all

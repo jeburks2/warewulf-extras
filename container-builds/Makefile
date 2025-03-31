@@ -1,179 +1,255 @@
-# Define variables
-NVIDIA_VERSION ?= 555.42.02
-MLX_VERSION ?= 23.10-3.2.2.0
+# Define global variables
+NVIDIA_VERSION ?= 565.57.01
+MLX_VERSION ?= 24.10-2.1.8.0
+WWDRACUT_VERSION ?= 4.6.0
+RSTUDIO_VERSION ?= 2024.12.1-563
 PODMAN_ARGS ?= 
-DATE := $(shell date +\%Y\%m\%d_\%H\%M)
-REPOS := /var/lib/warewulf/overlays/repos/rootfs/etc/yum.repos.d/
-ARM_REPOS := /var/lib/warewulf/overlays/repos-aarch64/rootfs/etc/yum.repos.d/
-VECTOR_REPOS := /var/lib/warewulf/overlays/fpga_vectorEngine/rootfs/etc/yum.repos.d/
+DATE := $(shell date +\%Y\%m\%d)
+TIME := $(shell date +\%H\%M)
+
+# Repository base path (Overlays)
+REPO_BASE := /var/lib/warewulf/overlays
+REPO_SUFFIX := /rootfs/etc/yum.repos.d/
+
+# Directories
 INSTALL_TMP := .install.tmp
 BUILD_TMP_DIR := ./.buildtmp
+DRACUT_CMD := "/root/wwdracut"
+
+# Define color codes
+RED := [0;31m
+GREEN := [0;32m
+YELLOW := [0;33m
+BLUE := [0;34m
+NC := [0m # No Color
+
+# Define the get-dependencies macro to expand variables immediately
+# get-nvidia-driver parameters:
+# $(1): Architecture (x86_64, aarch64)
+define get-nvidia-driver
+$(BUILD_TMP_DIR)/NVIDIA-Linux-$(1)-$(NVIDIA_VERSION).run
+endef
+
+# get-mlx-driver parameters:
+# $(1): Architecture (x86_64, aarch64)
+# $(2): OS version (8.10, 9.5, etc.)
+define get-mlx-driver
+mlx/MLNX_OFED_LINUX-$(MLX_VERSION)-rhel$(2)-$(1).tgz
+endef
 
 # Default target
 .PHONY: all
-all: cuda rocm gracehopper success
+all: solcuda phxcuda rocm vectorengine gracehopper success install
+
+.PHONY: sol
+sol: cuda rocm vectorengine gracehopper success
+
+.PHONY: phx
+phx: phxcuda
+
+.PHONY: cuda
+cuda: solcuda phxcuda gracehopper
+
 
 # Initialize environment
 .PHONY: init
 init: packages
-	@mkdir -p $(BUILD_TMP_DIR)/repos
+	@mkdir -p $(BUILD_TMP_DIR)
 	@cp /etc/passwd $(BUILD_TMP_DIR)/passwd
 	@cp /etc/group $(BUILD_TMP_DIR)/group
-	@cp $(REPOS)/*.repo $(BUILD_TMP_DIR)/repos
 	@touch $(BUILD_TMP_DIR)/init
 
-# Download NVIDIA driver for x86_64 if not already present
-$(BUILD_TMP_DIR)/NVIDIA-Linux-x86_64-$(NVIDIA_VERSION).run:
-	@echo "Downloading Nvidia Drivers for x86_64..."
+# Function to prepare repos for a specific target
+# prepare_repos parameters:
+# $(1): Repository path (repos, repos-aarch64, etc.)
+define prepare_repos
+	@echo "$(GREEN)Staging repos from $(BLUE)$(REPO_BASE)/$(1)$(REPO_SUFFIX)$(GREEN) overlay$(NC)"
+	@mkdir -p $(BUILD_TMP_DIR)/$(1)/repos
+	@cp $(REPO_BASE)/$(1)$(REPO_SUFFIX)/*.repo $(BUILD_TMP_DIR)/$(1)/repos
+endef
+
+# Download NVIDIA driver
+$(BUILD_TMP_DIR)/NVIDIA-Linux-%.run:
+	@echo "$(YELLOW)Downloading NVIDIA Driver $(BLUE)NVIDIA-Linux-$*$(YELLOW)...$(NC)"
+	@mkdir -p $(BUILD_TMP_DIR)
 	@cd $(BUILD_TMP_DIR); \
-		wget https://download.nvidia.com/XFree86/Linux-x86_64/$(NVIDIA_VERSION)/NVIDIA-Linux-x86_64-$(NVIDIA_VERSION).run ; \
+		wget https://download.nvidia.com/XFree86/Linux-$(word 1,$(subst -, ,$*))/$(NVIDIA_VERSION)/NVIDIA-Linux-$*.run; \
 		cd -
 
-# Download NVIDIA driver for aarch64 if not already present
-$(BUILD_TMP_DIR)/NVIDIA-Linux-aarch64-$(NVIDIA_VERSION).run:
-	@echo "Downloading Nvidia Drivers for aarch64..."
-	@cd $(BUILD_TMP_DIR); \
-		wget https://download.nvidia.com/XFree86/Linux-aarch64/$(NVIDIA_VERSION)/NVIDIA-Linux-aarch64-$(NVIDIA_VERSION).run ; \
+# Download MLX driver
+mlx/MLNX_OFED_LINUX-$(MLX_VERSION)-rhel%.tgz:
+	@echo "$(YELLOW)Downloading MLX Driver $(BLUE)MLNX_OFED_LINUX-$(MLX_VERSION)-rhel$*.$(YELLOW)...$(NC)"
+	@mkdir -p mlx
+	@cd mlx; \
+		wget https://content.mellanox.com/ofed/MLNX_OFED-$(MLX_VERSION)/MLNX_OFED_LINUX-$(MLX_VERSION)-rhel$*.tgz; \
 		cd -
 
-# Target for CUDA build
-cuda: TAG := sol-x86-rocky8-cuda-$(NVIDIA_VERSION)
-cuda: init Containerfile.cuda $(BUILD_TMP_DIR)/NVIDIA-Linux-x86_64-$(NVIDIA_VERSION).run
-	@echo "Building CUDA variant"
-	@mkdir -p $(BUILD_TMP_DIR)/cuda/repos && cp $(REPOS)/*.repo $(BUILD_TMP_DIR)/cuda/repos
+# Generic function for podman build
+# podman_build parameters:
+# $(1): Target/variant name (cuda, rocm, etc.)
+# $(2): Container tag name (sol-x86_64-rocky8.10-cuda-555.42.02, etc.)
+# $(3): Architecture (x86_64, aarch64)
+# $(4): OS version (8.10, 9.5, etc.)
+# $(5): Repository overaly name (repos, repos-aarch64, etc.)
+define podman_build
+	@echo "$(GREEN)Building $(BLUE)$(1)$(GREEN) variant$(NC)"
+	$(call prepare_repos,$(5))
+	@if [ "$(shell uname -m)" != "$(3)" ]; then \
+		echo "$(YELLOW)Setting up QEMU for cross-architecture build ($(BLUE)$(3)$(YELLOW))...$(NC)"; \
+		podman run --rm --privileged multiarch/qemu-user-static --reset -p yes; \
+	fi
 	@podman build $(PODMAN_ARGS) \
-		--file ./Containerfile.cuda \
+		--file ./Containerfile.$(1) \
 		--build-arg NVIDIA_VERSION=$(NVIDIA_VERSION) \
-		--build-arg MLX_VERSION=$(MLX_VERSION)-rhel8.10-x86_64 \
-		--build-arg PS1TAG=$(TAG) \
+		--build-arg MLX_VERSION=$(MLX_VERSION)-rhel$(4)-$(3) \
+		--build-arg WWDRACUT_VERSION=$(WWDRACUT_VERSION) \
+		--build-arg RSTUDIO_VERSION=$(RSTUDIO_VERSION) \
+		--build-arg PS1TAG=$(2) \
 		--build-arg BUILD_TMP_DIR=$(BUILD_TMP_DIR) \
+		--build-arg TARGET_ARCH=$(3) \
+		--build-arg OS_VERSION=$(4) \
+		--build-arg REPO_PATH=$(5) \
 		--volume $(PWD):/mnt:O \
-		--tag $(TAG):$(DATE) || { \
-		echo "Error: Failed to build CUDA variant with exit code $$?. Exiting."; \
+		--tag $(2):$(DATE)_$(TIME) || { \
+		echo "$(RED)Error: Failed to build $(BLUE)$(1)$(RED) variant with exit code $$?. Exiting.$(NC)"; \
 		exit 1; \
 	}
-	@podman save $(TAG):$(DATE) --output $(TAG).$(DATE).tar || { \
-		echo "Error: Failed to save CUDA variant with exit code $$?. Exiting."; \
+	@podman save $(2):$(DATE)_$(TIME) --output $(2).$(DATE)_$(TIME).tar || { \
+		echo "$(RED)Error: Failed to save $(BLUE)$(1)$(RED) variant with exit code $$?. Exiting.$(NC)"; \
 		exit 1; \
 	}
-	@echo "wwctl container import --syncuser $(PWD)/$(TAG).$(DATE).tar $(TAG).$(DATE)" >> $(INSTALL_TMP)
-	@echo "wwctl container exec $(TAG).$(DATE)" /bin/passwd >> $(INSTALL_TMP)
-	@make success
+	@echo 'wwctl image import --syncuser $(PWD)/$(2).$(DATE)_$(TIME).tar $(2).$(DATE)' >> $(INSTALL_TMP)
+	@echo 'wwctl image exec $(2).$(DATE) $(DRACUT_CMD)' >> $(INSTALL_TMP)
+endef
+
+# Target for Sol CUDA build
+solcuda:
+	$(eval TARGET_ARCH := x86_64)
+	$(eval OS_VERSION := 8.10)
+	$(eval REPOS := repos-rocky8)
+	$(eval TAG := sol-$(TARGET_ARCH)-rocky$(OS_VERSION)-cuda-$(NVIDIA_VERSION))
+	$(MAKE) init Containerfile.$@ $(call get-nvidia-driver,$(TARGET_ARCH)) $(call get-mlx-driver,$(TARGET_ARCH),$(OS_VERSION))
+	$(call podman_build,$@,$(TAG),$(TARGET_ARCH),$(OS_VERSION),$(REPOS))
+	@$(MAKE) success
+
+# Target for PHX CUDA build
+phxcuda:
+	$(eval TARGET_ARCH := x86_64)
+	$(eval OS_VERSION := 8.10)
+	$(eval REPOS := repos-rocky8)
+	$(eval TAG := phx-$(TARGET_ARCH)-rocky$(OS_VERSION)-cuda-$(NVIDIA_VERSION))
+	$(MAKE) init Containerfile.$@ $(call get-nvidia-driver,$(TARGET_ARCH))
+	$(call podman_build,$@,$(TAG),$(TARGET_ARCH),$(OS_VERSION),$(REPOS))
+	@$(MAKE) success
+
+# Target for PHX legacy CUDA build, with fixed NVIDIA version
+phxlegacycuda:
+	$(eval TARGET_ARCH := x86_64)
+	$(eval OS_VERSION := 8.10)
+	$(eval REPOS := repos-rocky8)
+	$(eval NVIDIA_VERSION := 515.105.01)
+	$(eval TAG := phx-$(TARGET_ARCH)-rocky$(OS_VERSION)-cuda-$(NVIDIA_VERSION))
+	$(MAKE) init Containerfile.$@ NVIDIA_VERSION=$(NVIDIA_VERSION) \
+		$(BUILD_TMP_DIR)/NVIDIA-Linux-$(TARGET_ARCH)-$(NVIDIA_VERSION).run
+	$(call podman_build,$@,$(TAG),$(TARGET_ARCH),$(OS_VERSION),$(REPOS))
+	@$(MAKE) success
 
 # Target for ROCM build
-rocm: TAG := sol-x86-rocky8-rocm
-rocm: init Containerfile.rocm
-	@echo "Building ROCM variant"
-	@mkdir -p $(BUILD_TMP_DIR)/rocm/repos && cp $(REPOS)/*.repo $(BUILD_TMP_DIR)/rocm/repos
-	@podman build $(PODMAN_ARGS) \
-		--file ./Containerfile.rocm \
-		--build-arg MLX_VERSION=$(MLX_VERSION)-rhel8.10-x86_64 \
-		--build-arg PS1TAG=$(TAG) \
-		--build-arg BUILD_TMP_DIR=$(BUILD_TMP_DIR) \
-		--volume $(PWD):/mnt:O \
-		--tag $(TAG):$(DATE) || { \
-		echo "Error: Failed to build ROCM variant with exit code $?. Exiting."; \
-		exit 1; \
-	}
-	@podman save $(TAG):$(DATE) --output $(TAG).$(DATE).tar || { \
-		echo "Error: Failed to save ROCM variant with exit code $?. Exiting."; \
-		exit 1; \
-	}
-	@echo "wwctl container import --syncuser $(PWD)/$(TAG).$(DATE).tar $(TAG).$(DATE)" >> $(INSTALL_TMP)
-	@echo "wwctl container exec $(TAG).$(DATE)" /bin/passwd >> $(INSTALL_TMP)
-	@make success
+rocm:
+	$(eval TARGET_ARCH := x86_64)
+	$(eval OS_VERSION := 8.10)
+	$(eval REPOS := repos-rocky8)
+	$(eval TAG := sol-$(TARGET_ARCH)-rocky$(OS_VERSION)-$@)
+	$(MAKE) init Containerfile.$@ $(call get-mlx-driver,$(TARGET_ARCH),$(OS_VERSION))
+	$(call podman_build,$@,$(TAG),$(TARGET_ARCH),$(OS_VERSION),$(REPOS))
+	@$(MAKE) success
 
 # Target for GraceHopper build
-gracehopper: TAG := sol-arm-rocky9-cuda-$(NVIDIA_VERSION)
-gracehopper: init Containerfile.gracehopper $(BUILD_TMP_DIR)/NVIDIA-Linux-aarch64-$(NVIDIA_VERSION).run
-	@echo "Building GraceHopper variant"
-	@mkdir -p $(BUILD_TMP_DIR)/gracehopper/repos && cp $(ARM_REPOS)/*.repo $(BUILD_TMP_DIR)/gracehopper/repos
-	@podman build $(PODMAN_ARGS) \
-		--file ./Containerfile.gracehopper \
-		--build-arg NVIDIA_VERSION=$(NVIDIA_VERSION) \
-		--build-arg MLX_VERSION=$(MLX_VERSION)-rhel9.4-aarch64 \
-		--build-arg PS1TAG=$(TAG) \
-		--build-arg BUILD_TMP_DIR=$(BUILD_TMP_DIR) \
-		--volume $(PWD):/mnt:O \
-		--tag $(TAG):$(DATE) || { \
-		echo "Error: Failed to build GraceHopper variant with exit code $?. Exiting."; \
-		exit 1; \
-	}
-	@podman save $(TAG):$(DATE) --output $(TAG).$(DATE).tar || { \
-		echo "Error: Failed to save GraceHopper variant with exit code $?. Exiting."; \
-		exit 1; \
-	}
-	@echo "wwctl container import --syncuser $(PWD)/$(TAG).$(DATE).tar $(TAG).$(DATE)" >> $(INSTALL_TMP)
-	@echo "wwctl container exec $(TAG).$(DATE)" /bin/passwd >> $(INSTALL_TMP)
-	@make success
+gracehopper:
+	$(eval TARGET_ARCH := aarch64)
+	$(eval OS_VERSION := 9.5)
+	$(eval REPOS := repos-aarch64)
+	$(eval TAG := sol-$(TARGET_ARCH)-rocky$(OS_VERSION)-cuda-$(NVIDIA_VERSION))
+	$(MAKE) init Containerfile.$@ $(call get-nvidia-driver,$(TARGET_ARCH)) $(call get-mlx-driver,$(TARGET_ARCH),$(OS_VERSION))
+	$(call podman_build,$@,$(TAG),$(TARGET_ARCH),$(OS_VERSION),$(REPOS))
+	@$(MAKE) success
 
-# Target for VectorEngine build
-vectorengine: TAG := sol-x86-rocky8.8-vectorengine
-vectorengine: init Containerfile.vectorengine
-	@echo "Building VectorEngine variant"
-	@mkdir -p $(BUILD_TMP_DIR)/vectorengine/repos && cp $(VECTOR_REPOS)/*.repo $(BUILD_TMP_DIR)/vectorengine/repos
-	@podman build $(PODMAN_ARGS) \
-		--file ./Containerfile.vectorengine \
-		--build-arg MLX_VERSION=$(MLX_VERSION)-rhel8.8-x86_64 \
-		--build-arg PS1TAG=$(TAG) \
-		--build-arg BUILD_TMP_DIR=$(BUILD_TMP_DIR) \
-		--volume $(PWD):/mnt:O \
-		--tag $(TAG):$(DATE) || { \
-		echo "Error: Failed to build VectorEngine variant with exit code $?. Exiting."; \
-		exit 1; \
-	}
-	@podman save $(TAG):$(DATE) --output $(TAG).$(DATE).tar || { \
-		echo "Error: Failed to save VectorEngine variant with exit code $?. Exiting."; \
-		exit 1; \
-	}
-	@echo "wwctl container import --syncuser $(PWD)/$(TAG).$(DATE).tar $(TAG).$(DATE)" >> $(INSTALL_TMP)
-	@echo "wwctl container exec $(TAG).$(DATE)" /bin/passwd >> $(INSTALL_TMP)
-	@make success
+# Target for VectorEngine FPGA build
+vectorengine:
+	$(eval TARGET_ARCH := x86_64)
+	$(eval OS_VERSION := 8.8)
+	$(eval REPOS := fpga_vectorEngine)
+	$(eval TAG := sol-$(TARGET_ARCH)-rocky$(OS_VERSION)-$@)
+	$(MAKE) init Containerfile.$@ $(call get-mlx-driver,$(TARGET_ARCH),$(OS_VERSION))
+	$(call podman_build,$@,$(TAG),$(TARGET_ARCH),$(OS_VERSION),$(REPOS))
+	@$(MAKE) success
+
+# Template for creating a new variant
+# Copy this section and replace 'newvariant' with your variant name
+# Make sure the variant name has a matching Containerfile.variant_name
+# Adjust TARGET_ARCH, OS_VERSION, REPOS as needed
+# Add any specific dependencies if needed
+#newvariant:
+#	$(eval TARGET_ARCH := x86_64)
+#	$(eval OS_VERSION := 8.10) # Expected 
+#	$(eval REPOS := repos) # This is the name of the overlay containing the .repo files
+#	$(eval TAG := sol-$(TARGET_ARCH)-rocky$(OS_VERSION)-$@)
+#	$(MAKE) init Containerfile.$@ $(call get-mlx-driver,$(TARGET_ARCH),$(OS_VERSION))
+#	# Add any other specific dependencies here if needed
+#	# e.g., $(call get-nvidia-driver,$(TARGET_ARCH)) for NVIDIA support
+#	$(call podman_build,$@,$(TAG),$(TARGET_ARCH),$(OS_VERSION),$(REPOS))
+#	@$(MAKE) success
+#	
 
 # Clean up
 .PHONY: clean
 clean:
-	@rm -rf $(BUILD_TMP_DIR) $(INSTALL_TMP) 
-	@rm -rf NVIDIA*.run
-	@podman image prune -f >/dev/null
+	@initial_space=$$(df --output=avail . | tail -n 1); \
+		echo "$(YELLOW)Removing temporary build files...$(NC)"; \
+		rm -rf $(BUILD_TMP_DIR) $(INSTALL_TMP) ; \
+		echo "$(YELLOW)Removing old builds...$(NC)"; \
+		rm -f ./*.tar; \
+		final_space=$$(df --output=avail . | tail -n 1); \
+		space_freed=$$((final_space - initial_space)); \
+                space_freed_gb=$$(awk "BEGIN {printf \"%.2f\", $$space_freed / 1024 / 1024}"); \
+                echo "$(GREEN)Free disk space: $(BLUE)$$(df -h --output=avail . | tail -n 1)$(GREEN) (cleaned: $(BLUE)$${space_freed_gb}G$(GREEN))$(NC)";
 
 # Very clean up
 .PHONY: veryclean
 veryclean: clean
-	@initial_space=$$(df --output=avail / | tail -n 1); \
-		echo "Removing old builds..."; \
-		rm -f sol*.tar; \
-		echo "Cleaning up and resetting podman..."; \
+	@initial_space=$$(df --output=avail . | tail -n 1); \
+		echo "$(YELLOW)Removing dangling podman images...$(NC)"; \
+                podman image prune -f >/dev/null; \
+		echo "$(YELLOW)Cleaning up and resetting podman...$(NC)"; \
 		for i in $$(podman container list --external | tail -n +2 | cut -d' ' -f 1); do \
 			podman container rm $$i -f; \
 		done; \
 		rm -rf /var/lib/containers/storage/overlay/ || true; \
 		sleep 1 && podman system reset -f >/dev/null; \
-		final_space=$$(df --output=avail / | tail -n 1); \
-        	space_freed=$$((final_space - initial_space)); \
-        	space_freed_gb=$$(awk "BEGIN {printf \"%.2f\", $$space_freed / 1024 / 1024}"); \
-		echo "Free disk space: $$(df -h --output=avail / | tail -n 1) (cleaned: $${space_freed_gb}G)";
+		final_space=$$(df --output=avail . | tail -n 1); \
+		space_freed=$$((final_space - initial_space)); \
+		space_freed_gb=$$(awk "BEGIN {printf \"%.2f\", $$space_freed / 1024 / 1024}"); \
+		echo "$(GREEN)Free disk space: $(BLUE)$$(df -h --output=avail . | tail -n 1)$(GREEN) (cleaned: $(BLUE)$${space_freed_gb}G$(GREEN))$(NC)";
 
 # Display install log
 .PHONY: success
 success:
 ifeq ($(wildcard $(INSTALL_TMP)),)
-	@echo -e "\e[1;31mNo containers to be added to warewulf.\e[0m"
+	@echo "$(RED)No images to be added to warewulf.$(NC)"
 else
-	@echo -e "\e[1;32m========================================================================"
-	@echo "Success! Now run the following commands to import the containers into warewulf:"
+	@echo "$(GREEN)========================================================================$(NC)"
+	@echo "$(GREEN)Success! Now run the following commands to import the images into Warewulf:$(NC)"
 	@cat $(INSTALL_TMP)
-	@echo "You can also run 'make install' to execute the above commands."
-	@echo -e "========================================================================\e[0m"
+	@echo "$(GREEN)You can also run 'make install' to execute the above commands.$(NC)"
+	@echo "$(GREEN)========================================================================$(NC)"
 endif
 
 # Install target to run import commands
 .PHONY: install
 install: 
 ifeq ($(wildcard $(INSTALL_TMP)),)
-	@echo -e "\e[1;31mNo containers to be added to warewulf.\e[0m"
+	@echo "$(RED)No images to be added to Warewulf.$(NC)"
 else
-	@echo -e "\e[1;32mRunning import commands...\e[0m"
+	@echo "$(GREEN)Running import commands...$(NC)"
 	@bash -c "$$(cat $(INSTALL_TMP))"
-#######	@$(MAKE) clean
 endif

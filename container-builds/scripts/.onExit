@@ -31,7 +31,7 @@ rotate_log() {
 }
 
 echo ""
-echo -e "${BOLD}Change Management is Important! Who are you and what did you do to the container?${RESET}"
+echo -e "${BOLD}Change Management is Important! Who are you and what did you do to the image?${RESET}"
 echo ""
 
 # Prompt for username and loop until a non-empty username is provided
