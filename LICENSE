@@ -1,8 +1,11 @@
-Parts of this repository, specifically, but not exclusively, the inti.ww and chainload.ipxe files, contain snippets of scripts that ship with Warewulf. 
-This is to provide important context for my blocks of code within these scripts. In these files, I have highlighted and distinguished my blocks of code with #blame blocks. 
-It is important to remember that the Warewulf developers do not endorse my code in any way. It is provided here solely for inspirational purposes. It should not be copy and pasted into production. Download Warewulf from the official sources, and write scripts that will work for your environment. 
 
-Since the original Warewulf code is not my work, the original Warewulf LICENSE is stated below. 
+# License
+
+Parts of this repository, specifically, but not exclusively, the init.ww and chainload.ipxe files, contain snippets of scripts that ship with Warewulf.
+This is to provide important context for my blocks of code within these scripts. In these files, I have highlighted and distinguished my blocks of code with #blame blocks.
+It is important to remember that the Warewulf developers do not endorse my code in any way. It is provided here solely for inspirational purposes. It should not be copy and pasted into production. Download Warewulf from the official sources, and write scripts that will work for your environment.
+
+Since the original Warewulf code is not my work, the original Warewulf LICENSE is stated below.
 
 Copyright (c) 2001-2023, Gregory M. Kurtzer. All rights reserved.
 Copyright (c) 2003-2011, The Regents of the University of California, through Lawrence Berkeley National Laboratory (subject to receipt of any required approvals from the U.S. Dept. of Energy). All rights reserved.
