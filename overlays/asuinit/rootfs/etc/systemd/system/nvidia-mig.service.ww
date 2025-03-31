@@ -1,0 +1,12 @@
+[Unit]
+DefaultDependencies=no
+After=network-online.target remote-fs.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=sh -c 'nvidia-smi -mig 1 && nvidia-smi mig -cgi {{ .Tags.gpuMigType | default "14,14,14,15" }} -C'
+
+[Install]
+WantedBy=network-online.target

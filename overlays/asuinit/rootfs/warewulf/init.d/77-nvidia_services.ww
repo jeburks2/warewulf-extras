@@ -1,0 +1,17 @@
+# Sample script to enable NVIDIA services on GPU nodes using Tags and systemd
+{{if eq .Tags.gpuVendor "nvidia" }}
+
+ln -s /etc/systemd/system/nvidia-persistenced.service /etc/systemd/system/multi-user.target.wants/nvidia-persistenced.service
+ln -s /usr/lib//systemd/system/nvidia-dcgm.service /etc/systemd/system/multi-user.target.wants/nvidia-dcgm.service
+
+{{if eq .Tags.gpuType "mig" }}
+# This is a custom scirpt to enable MIG on the node, included in this reposoitory
+ln -s /etc/systemd/system/nvidia-mig.service /etc/systemd/system/multi-user.target.wants/nvidia-mig.service
+{{end}}
+
+{{if eq .Tags.gpuType "h100" }}{{if eq .Tags.gpuCount "8" }}
+# Our H100 node that has 8 GPUs requires the fabric manager to be enabled
+ln -s /usr/lib/systemd/system/nvidia-fabricmanager.service /etc/systemd/system/multi-user.target.wants/nvidia-fabricmanager.service
+{{end}}{{end}}
+
+{{end}}

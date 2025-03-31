@@ -1,3 +1,0 @@
-{{if .Tags.gpuCount}} {{/* Check if tags.gpu_count exists indicating this is a gpu node and enable nvidia-persistanced */}}
-ln -s /usr/lib/systemd/system/nvidia-persistenced.service /etc/systemd/system/multi-user.target.wants/nvidia-persistenced.service
-{{end}}
